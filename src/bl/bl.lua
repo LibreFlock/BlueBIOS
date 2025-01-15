@@ -1,17 +1,181 @@
 ::sof::
 
+local blue = blue ---@diagnostic disable-line: undefined-global
 local trigger1, trigger2
 
 local component = component or require("component") ---@diagnostic disable-line: undefined-global
 local computer = computer or require("computer") ---@diagnostic disable-line: undefined-global
 
-local gpu, res_x, res_y
 -- known issues:
--- crashing on two drives with the same label
 -- shell on no drive
+-- screen tear on tier 1 gpus in lua shell
 
-gpu = component.proxy(component.list("gpu")())
-res_x, res_y = gpu.getResolution()
+local gpu = component.proxy(component.list("gpu")())
+local res_x, res_y = gpu.getResolution()
+
+function blue.fn.shell()
+    local function centrize(message)
+        gpu.fill(1, 1, res_x, res_y, " ")
+        return gpu.set(math.ceil(res_x/2-#message/2), math.ceil(res_y/2),  message)
+    end
+
+    _G.buffer = {}
+
+    function _G.print(text)
+        for _ in string.gmatch(tostring(text), "[^\r\n]+") do
+            if #tostring(text) > res_x then
+                for i=1,math.ceil(#tostring(text)/res_x) do
+                    buffer[#buffer+1] = string.sub(tostring(text), (i == 1 and 1) or res_x*(i-1), res_x*i-1)
+                end
+            else
+                buffer[#buffer+1] = tostring(text)
+            end
+        end
+    end
+
+    function _G.help()
+        print("exit Exits the shell")
+        print("help() Access list of predefined functions")
+        print("clear() Clears the current screen buffer")
+        print("print(text: str) Print a string")
+        print("To modify the buffer, the buffer dictionary exists.")
+        print("Typically to add a new value in the shell's buffer, you need to modify buffer[#buffer+1].")
+        print("The print function supports wrap around text.")
+        print("Blue's predefined dictionary")
+        print("'blue' is the global dictionary for blue's functions and variables.")
+        print("Variables: 'blue.vb.init', 'blue.vb.boot_label', 'blue.vb.boot_drive'")
+        print("Functions: 'blue.fn.shell'")
+    end
+
+    function _G.clear()
+        _G.buffer = nil
+    end
+
+    buffer[1] = "You are currently in a recovery shell in BIOS."
+    buffer[2] = "Enter 'help()' for a list of functions." .. res_y
+    buffer[#buffer+1] = "bootloader> "
+    local shift = false
+    local caps_lock = false
+    local command = ""
+    local command_entered = true
+    local lgpu = false
+
+    centrize("")
+
+    ::render::
+
+    if type(buffer) ~= "table" then
+        _G.buffer = {}
+        buffer[1] = "bootloader> "
+    end
+
+    if gpu.getDepth() < 1 then
+        lgpu = true
+    end
+
+    for i=1,res_y do
+        if buffer[#buffer-i+1] then
+            if i == 1 and gpu.getDepth() > 1 then
+                if command_entered then
+                    centrize("")
+                end
+                local f_buffer = buffer[#buffer-i+1]
+                if not lgpu then
+                    gpu.fill(#f_buffer+1, res_y, res_y-#f_buffer-1, 1, " ")
+                    gpu.setForeground(0xaec5d4)
+                    gpu.set(1, res_y, f_buffer)
+                    gpu.setForeground(0x9cc3db)
+                    gpu.setBackground(0xaec5d4)
+                    gpu.set(#f_buffer+1, res_y, " ")
+                    gpu.setBackground(0x003150)
+                else
+                    gpu.setBackground(0x000000)
+                    gpu.setForeground(0xFFFFFF)
+                    gpu.fill(#f_buffer+1, res_y, res_y-#f_buffer-1, 1, " ")
+                    gpu.set(#f_buffer+1, res_y, " ")
+                    gpu.setBackground(0xFFFFFF)
+                    gpu.set(1, res_y, f_buffer)
+                    gpu.setBackground(0x000000)
+                end
+            elseif command_entered then
+                gpu.set(1, res_y-i+1, buffer[#buffer-i+1])
+            end
+        end
+    end
+
+    if command_entered then
+        command_entered = false
+    end
+
+    local event, _, char, code = computer.pullSignal()
+    if not char then
+        if event == "key_down" then
+            if code == 42 or code == 54 then
+                shift = true
+            elseif code == 58 then
+                caps_lock = not caps_lock
+            end
+        elseif event == "key_up" then
+            if code == 42 or code == 54 then
+                shift = false
+            end
+        end
+    else
+        if event == "key_down" then
+            if code == 28 then
+                if command == "exit" then
+                    return
+                elseif command == "reboot" then
+                    computer.shutdown(1)
+                elseif command == "shutdown" then
+                    computer.shutdown()
+                end
+                result, reason = pcall(load(command))
+                command_entered = true
+                if reason then
+                    local wraparound = false
+                    for _ in string.gmatch(reason, "[^\r\n]+") do
+                        if #reason > res_x then
+                            wraparound = true
+                            for i=1,math.ceil(#reason/res_x) do
+                                buffer[#buffer+1] = string.sub(reason, (i == 1 and 1) or res_x * (i-1), res_x*i)
+                            end
+                        else
+                            buffer[#buffer+1] = reason
+                        end
+                    end
+                    if wraparound then
+                        centrize("")
+                    end
+                end
+                if type(buffer) ~= "table" then
+                    _G.buffer = {}
+                end
+                buffer[#buffer+1] = "bootloader> "
+                command = ""
+                goto render
+            elseif code == 14 then
+                if #buffer[#buffer] > 12 then
+                    command = string.sub(command, 1, #command-1)
+                    buffer[#buffer] = string.sub(buffer[#buffer], 1, #buffer[#buffer]-1)
+                end
+                goto render
+            elseif (char < 127 and char > 31) then
+                local letter = string.char(char)
+                if shift or caps_lock then
+                    letter = string.upper(letter)
+                end
+                buffer[#buffer] = buffer[#buffer] .. letter
+                command = command .. letter
+            end
+        elseif event == "clipboard" then
+            buffer[#buffer] = buffer[#buffer] .. char
+            command = command .. char
+        end
+    end
+
+    goto render
+end
 
 local shift = false
 local caps_lock = false
@@ -172,7 +336,7 @@ end
 invert(false)
 
 repeat
-    local event, _, char, code = computer.pullSignal()
+    local event, _, _, code = computer.pullSignal()
     if event == "key_down" then
         if code == 200 then
             selected_row = row_1
